@@ -36,29 +36,44 @@ threads/thread.h
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+threads/thread.h:
+
+struct thread {
+  int64_t remaining_ticks; /* Remaining ticks in the THREAD_BLOCKED state. */
+}
+
 ---- ALGORITHMS ----
 
 >> A2: Briefly describe what happens in a call to timer_sleep(),
 >> including the effects of the timer interrupt handler.
 
 The timer interrupt handler is the function timer_interrput() defined in devices/timer.c
-
+When timer_sleep() is called, the remaining_ticks of the current thread is set and the thread is blocked until the remaining_ticks becomes zero. On every timer interrupt, the remaining_ticks for every sleeping thread decrement by one.
 
 >> A3: What steps are taken to minimize the amount of time spent in
 >> the timer interrupt handler?
+
+To minimize the amount of time spent in the timer interrupt handler, we should reduce the number of operations on every timer interrupt. This is achieved by minimizing the operations on each thread. For this part, only a function that decrement each thread's remaining_ticks by one is added.
 
 ---- SYNCHRONIZATION ----
 
 >> A4: How are race conditions avoided when multiple threads call
 >> timer_sleep() simultaneously?
 
+In timer_sleep(), interrupt is disabled until the thread is unblocked. This guarantees that when a thread calls timer_sleep(), it will be blocked and the scheduler will select another thread to run.
+
 >> A5: How are race conditions avoided when a timer interrupt occurs
 >> during a call to timer_sleep()?
+
+By disabling interrupt in timer_sleep().
 
 ---- RATIONALE ----
 
 >> A6: Why did you choose this design?  In what ways is it superior to
 >> another design you considered?
+
+This design prevents the thread that calls timer_sleep() from continuously yielding the CPU. Instead of busy-waiting until remaining ticks become zero, the thread is blocked so the scheduler won't select it as the running thread.
+
 
 			 PRIORITY SCHEDULING
 			 ===================
@@ -69,9 +84,50 @@ The timer interrupt handler is the function timer_interrput() defined in devices
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+threads/thread.h
+
+struct thread {
+  int priority_original;    /* The priority value when the thread returns
+                               every donated priority. default: -1 */
+  struct lock *lock_waiting;    /* The lock that the thread waits for. */
+  struct list lock_list;        /* The list of locks held by the thread. */
+    
+}
+
+threads/synch.c
+struct semaphore_elem 
+{
+    int waiter_priority;                /* Used in condition variable only. */
+}
+
 >> B2: Explain the data structure used to track priority donation.
 >> Use ASCII art to diagram a nested donation.  (Alternately, submit a
 >> .png file.)
+
+In the structure thread, a lock pointer is used to track the lock that the thread waits for. Note that by design, a thread can wait for at most one lock at one time. This is because there is only one list element (i.e, elem) shared between thread.c and synch.c. Since the lock has a pointer to the holder, we can know which thread does this thread donate its priority to.
+How to track the received donations? Each thread has a list of locks held by the thread. If any other thread is waiting for any of these locks, that thread must have donated its priority.
+The original priority of a thread is stored in a member, priority_original. When a thread releases all the locks it holds, the thread does not need donation any more and its original priority should be restored.
+
+a nested donation case (refers to the test case):
+
+thread      priority    lock holding    lock waiting    action
+----------------------------------------------------------------------
+L             31        lockA                           L is created
+M             32        lockB           lockA           M is created
+H             33                        lockB           H is created
+----------------------------------------------------------------------
+L             33        lockA                           
+M             33        lockB           lockA           M donates to L
+H             33                        lockB           H donates to M
+----------------------------------------------------------------------
+L             31                                        L releases lockA
+M             33        lockA,lockB                     M acquires lockA
+H             33                        lockB           
+----------------------------------------------------------------------
+L             31                                        
+M             32                                      M releases lockA, lockB
+H             33                                      H acquires lockA           
+----------------------------------------------------------------------
 
 
 ---- ALGORITHMS ----
@@ -79,11 +135,19 @@ The timer interrupt handler is the function timer_interrput() defined in devices
 >> B3: How do you ensure that the highest priority thread waiting for
 >> a lock, semaphore, or condition variable wakes up first?
 
+The highest priority thread in the waiting list is selected to be added to the ready list.
+
 >> B4: Describe the sequence of events when a call to lock_acquire()
 >> causes a priority donation.  How is nested donation handled?
 
+The thread tries to acquire a lock but fails. It donates its priority to the thread holding that lock. The thread that receives the donation will set the priority to donation if the donation is higher than the current priority. This is not the end of a priority donation. If the thread is waiting for another lock, it will donate its priority as well. This process will stop when a thread receives a lower donation or it does not wait for any lock.
+
 >> B5: Describe the sequence of events when lock_release() is called
 >> on a lock that a higher-priority thread is waiting for.
+
+1. Select the highest priority thread in the waiting list and unblock it.
+2. Properly set the priority of the thread that calls lock_release().
+3. Call sema_up() and at least, thread_yield().
 
 ---- SYNCHRONIZATION ----
 
@@ -91,10 +155,15 @@ The timer interrupt handler is the function timer_interrput() defined in devices
 >> how your implementation avoids it.  Can you use a lock to avoid
 >> this race?
 
+When a thread is in thread_set_priority(), it may be preempted before its priority is set. To avoid it, iterrupt is disabled.
+A lock cannot avoid this race, because the thread can still be preempted even though it holds a lock. Although the other threads cannot get into this function, the schduler may select another thread to run because it sees the old priority value.
+
 ---- RATIONALE ----
 
 >> B7: Why did you choose this design?  In what ways is it superior to
 >> another design you considered?
+
+Selecting the thread with highest priority in the ready list requires a list traversal. Maximum heap data structure may also be considered. But everytime the priority of some thread changes, the heap should be rearranged.
 
 			  ADVANCED SCHEDULER
 			  ==================
@@ -105,6 +174,19 @@ The timer interrupt handler is the function timer_interrput() defined in devices
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+threads/thread.h
+
+struct thread {
+  int nice;                            /* Nice. */
+  fp_t recent_cpu;                     /* Recent CPU. */
+}
+
+threads/thread.c
+static fp_t load_avg;           /* Load average of the system. */
+
+threads/fixed_point.h
+
+typedef int fp_t;
 
 ---- ALGORITHMS ----
 
