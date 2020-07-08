@@ -1,0 +1,220 @@
+proj 1
+
+at the beginning, type in command line `make check`, the result is as follows:
+
+pass tests/threads/alarm-single
+pass tests/threads/alarm-multiple
+pass tests/threads/alarm-simultaneous
+FAIL tests/threads/alarm-priority
+pass tests/threads/alarm-zero
+pass tests/threads/alarm-negative
+FAIL tests/threads/priority-change
+FAIL tests/threads/priority-donate-one
+FAIL tests/threads/priority-donate-multiple
+FAIL tests/threads/priority-donate-multiple2
+FAIL tests/threads/priority-donate-nest
+FAIL tests/threads/priority-donate-sema
+FAIL tests/threads/priority-donate-lower
+FAIL tests/threads/priority-fifo
+FAIL tests/threads/priority-preempt
+FAIL tests/threads/priority-sema
+FAIL tests/threads/priority-condvar
+FAIL tests/threads/priority-donate-chain
+FAIL tests/threads/mlfqs-load-1
+FAIL tests/threads/mlfqs-load-60
+FAIL tests/threads/mlfqs-load-avg
+FAIL tests/threads/mlfqs-recent-1
+pass tests/threads/mlfqs-fair-2
+pass tests/threads/mlfqs-fair-20
+FAIL tests/threads/mlfqs-nice-2
+FAIL tests/threads/mlfqs-nice-10
+FAIL tests/threads/mlfqs-block
+20 of 27 tests failed.
+
+task 1-1: avoid busy-waiting
+In the original implementation of timer_sleep() in devices/timer.c, the current thread that calls this function continuously yields the CPU whenever it gets run, until the required sleep time passes. To avoid busy-waiting, we resort to thread_block () when a thread should sleep. Thus, the thread will not be scheduled until some other thread calls thread_unblock(). A new member remaining_ticks is added to thread structure to recording the remaining sleep time. On each time tick, the time interrupt handler timer_interrupt() will decrement the remaining_ticks for each thread and, when a thread in the blocked state has 0 remaining_ticks, the handler calls thread_unblock() for it.
+
+Note: need to check validity of the value tick. [alarm-zero, alarm-negative]
+
+task 1-2: change the ready list to a priority queue [alarm-priority]
+When we finish task 1-1, all test cases beginning with [alarm-] will pass except the [alarm-priority]. The [alarm-priority] case checks that when the alarm clock wakes up threads, the higher-priority threads run first. So what happens when a thread calls timer_sleep()? In tash 1-1, we implemented thread sleep by putting it to blocked state until it was unblocked by the time interrupt handler. When a thread is unblocked, it changes to the ready state and was put to the ready queue. When a current running thread yield the CPU, the scheduler chooses the next thread to run by popping the front of the ready queue. Therefore, by changing the ready queue to a priority queue where the higher priority threads are in the front, the scheduler will choose the highest priority thread to run next. Later, it is required for us to implement the priority donation. In this case, the priority of thread on the ready queue is dynamic. It is a better approach to modify the function next_thread_to_run() so that the scheduler chooses the highest priority thread.
+
+task 2-1: priority change [priority-change, priority-fifo, priority-preempt]
+First, let us deal with this case. In the Pinto guide section 2.2.3, it says 'when a thread is added to the ready list that has a higher priority than the currently running thread, the current thread should immediately yield the processor to the new thread'. Note that when a thread is created, it will be added to the ready list by thread_unblock(). One may think of adding thread_yield() at the end of thread_unblock() to implement such functionality. However, the annotation of thread_unblock() states that 'this function does not preempt the running thread'. Thus, we add thread_yield() at the end of thread_create() and thread_set_priority() instead.
+
+task 2-2: make the semaphore waiter list and condition variable waiter list to priority queue [priority-sema, priority-condvar]
+
+Note: When implementing the priority queue for condition variable, I added a new member waiter_priority to the struct semaphore_elem.
+
+Q: in threads/sync.c cond_wait(), why the struct semaphore_elem waiter need not be malloced?
+
+task 2-3: priority donation
+[priority-donate-one]	A    31    lockA
+						B    32    wait for lockA
+						C    33    wait for lockA
+[priority-donate-lower] A    31    lockA
+                        B    41    wait for lockA
+                        A lower its priority to 21 => do not take effect until release lockA
+[priority-donate-multiple]  Main    31    lockA, lockB
+							a       32    wait for lockA
+							b       33    wait for lockB
+							Main releases lockB => Main 32
+							Main releases lockA => Main 31
+[priority-donate-multiple2]		Main    31    lockA, lockB
+								a       34    wait for lockA
+								c       32
+								b      	36	  wait for lockB
+								Main releases lockA => Main 36
+								Main releases lockB => Main 31
+[priority-donate-chain]    thread[8] with increasing priority
+						    thread[i] holds lock[i] and wait for lock[i-1] (i > 0)
+						    the priority of thread[7] should propagate to thread
+[priority-donate-nest]  L    31    lockA 
+						M    32    lockB, wait for lockA
+						H    33    wait for lockB
+						=> L 33 M 33
+						L releases lockA => L 31 M 33
+						M releases lockA, lockB => M 32 H 33
+						=> H finished
+						=> M finished
+						=> L finished
+[priority-donate-sema]  Main    31
+						L       32    lockA, wait for semaphore
+						M       34    wait for semaphore
+						H       36    wait for lockA, wait for semaphore
+						=> L 36
+						=> whenever a thread waits for a semaphore, it donates its priority to any other thread that does not wait for this semaphore
+						=> Main 36
+Note: from the test cases we find that a thread can hold multiple locks, but only wait for at most 1 lock.
+
+When does thread A holding lock(s) lower its priority?
+=> all threads waiting for these locks have lower priority than thread A
+
+When thread A releases all the locks, what is its priority?
+=> another member priority_original to record the priority before donation.
+Note that this value changes when thread_set_priority() is called, and
+priority = max(priority, priority_original).
+
+Implementation: 
+in struct thread:
+    int priority_original: Record the original priority before donation.
+    	When a thread has not gone back to its original priority, user program
+    	may try to set the thread a new priority. If the new priority is less
+    	than the thread priority, we should not update the thread priority because it has received donation that is higher than the new priority. Instead, we update the original priority value so that when the thread returns all donations it received, the priority update takes effect.
+    struct lock* lock_waiting: The pointer to the lock that the thread is waiting for. When a thread waits for a lock, it is pushed back to the lock waiter list. As there is only one list element for the waiter list, it is guaranteed that a thread can wait for at most 1 lock.
+    struct list lock_list: A list of locks that the thread is holding. This is useful in the case where a thread received multiple donations. At the point the thread releases a lock and returns the highest donation it received, the thread has the donation from the thread with highest priority that is waiting for any lock in the lock list.
+
+Note: 1. When a thread waits for a lock, it donates its priority to the lock holder. The lock holder may be waiting for another lock, so it will donates the priority to the thread holding that lock. When a thread receives a donation, it will only update its priority when the donation is higher than its current value.
+
+task 3: Advanced scheduler
+
+Note: Thread priority is calucated initially at thread initialization and recalculated once every fourth time tick.
+
+
+pass tests/threads/mlfqs-block
+pass tests/threads/alarm-single
+pass tests/threads/alarm-multiple
+pass tests/threads/alarm-simultaneous
+pass tests/threads/alarm-priority
+pass tests/threads/alarm-zero
+pass tests/threads/alarm-negative
+pass tests/threads/priority-change
+pass tests/threads/priority-donate-one
+pass tests/threads/priority-donate-multiple
+pass tests/threads/priority-donate-multiple2
+pass tests/threads/priority-donate-nest
+pass tests/threads/priority-donate-sema
+pass tests/threads/priority-donate-lower
+pass tests/threads/priority-fifo
+pass tests/threads/priority-preempt
+pass tests/threads/priority-sema
+pass tests/threads/priority-condvar
+pass tests/threads/priority-donate-chain
+pass tests/threads/mlfqs-load-1
+pass tests/threads/mlfqs-load-60
+pass tests/threads/mlfqs-load-avg
+pass tests/threads/mlfqs-recent-1
+pass tests/threads/mlfqs-fair-2
+pass tests/threads/mlfqs-fair-20
+pass tests/threads/mlfqs-nice-2
+pass tests/threads/mlfqs-nice-10
+pass tests/threads/mlfqs-block
+All 27 tests passed.
+
+
+threads/vaddr.h
+1. ptov(), vtop()
+Q: Why does Pintos implement a physical frame address to kernel virtual address mapping?
+A: [Pintos guide 4.1.2.2] 80x86 does not provide any way to access memory at a physical address
+
+threads/thread.c
+2. running_thread()
+Q: How does the OS locate the current running thread?
+A: Each thread structure is stored in its own 4KB page. The CPU's stack pointer tells the current stack's top, which is somewhere in the middle of a thread's page. Since 'struct thread' is always at the beginning of a page, by rounding it down, the thread can be located.
+
+threads/palloc.c
+3. palloc_get_multiple()
+Q: How does the OS allocate consecutive free pages?
+Pintos system memory is divided into kernel and user pools.
+The user pool is for user memory pages and kernel pool for everything else.
+By default, system memory is evenly devided into these two pools.
+A memory pool contains a bitmap for free pages. When palloc_get_multiple() is called for allocating k pages, it scans the bitmap for k consecutive elements that are marked as true (which indicates that corresponding pages are available) and gets the index of the first available bit. Then the starting address of the first available page can be calculated because the pool base address, number of pages(i.e, k) and the page size are known. The function sets these k bits on the bitmap to false and returns the starting address of the first page allocated. 
+
+threads/malloc.c
+4. malloc()
+Q: How does malloc() work?
+First let's read the description of malloc() implementation:
+/*
+	The size of each request, in bytes, is rounded up to a power
+   of 2 and assigned to the "descriptor" that manages blocks of
+   that size.  The descriptor keeps a list of free blocks.  If
+   the free list is nonempty, one of its blocks is used to
+   satisfy the request.
+
+   	Otherwise, a new page of memory, called an "arena", is
+   obtained from the page allocator (if none is available,
+   malloc() returns a null pointer).  The new arena is divided
+   into blocks, all of which are added to the descriptor's free
+   list.  Then we return one of the new blocks.
+*/
+There are two cases depending on how much memory is requested.
+(i) If the memory requested is smaller than 1KB,
+Pintos maintains an array of block descriptors. Each descriptor contains a member block_size describing the size of block elements, and a list of free blocks. The size of blocks elements are 16B, 32B, ..., 1KB. On requesting x memory, x is rounded up to the nearest power of 2, say y. Then we check the block descriptor whose block_size is y. If the list of free blocks is not empty, the function malloc() returns one of the free blocks. Otherwise, palloc_get_multiple() is called for allocating a new page (the term for this page is "arena"). The arena consists a struct and the remaing are blocks.
+
++--------------+ 0
+| struct arena |
+| some members |
+|--------------|
+| block 1      |
+|--------------|
+| block 2      |
+|--------------|
+| ...          |
+|              |
++--------------+ 4KB
+
+These blocks in the arena are added to the free list in block descriptor. So now the list is not empty.
+
+(ii) If the memory requested is no less than 1KB,
+The requested memory, x is rounded up to the nearest multiple of page size. malloc() essentially calls palloc_get_multiple().
+
+
+Q: Is malloc() thread-safe?
+Yes. Each block descriptor has a lock so that no two processes that requests the same amount of block memory can access the block descriptor simultaneously. The page allocation process guarantees thread-safety by locks in both user and kernel pools.
+
+Q: Are there any cases where malloc() may result in poor utilization of memory?
+Yes. For example, if we request for (page size + 1B) memory, malloc() actually allocates (2 * page size) for us.
+
+5. free()
+Q: How does the OS detect the behavior that memory is still used after it has already been freed?
+A: By setting the freed memory to 0xcc, which can help detect use-after-free bugs.
+
+threads/init.c & threads/pte.h
+6. paging_init()
+Q: What does paging_init() do?
+A: (1) Get one page as page directory which stores page directory entries (PDE). Every PDE may points to a page table. Since the page size is 4KB and a PDE is 32-bit address, there are at most 1024 PDEs.
+   (2) Create page directory entries and page table entries (PTE). Each PDE/PTE consists of 20-bit physical address and 12-bit flag bits.
+   (3) Store the physical address of the page directory into CR3.
+
+ 
+

@@ -4,7 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
-
+#include "fixed_point.h"
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -97,6 +97,16 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
 #endif
+    /* Proj 1. Alarm clock */
+    int64_t remaining_ticks;             /* Remaining ticks in the THREAD_BLOCKED state. */
+    /* Proj 1. Priority scheduling and priority donation */
+    int priority_original;               /* The priority value when the thread returns
+                                            every donated priority. default: -1 */
+    struct lock *lock_waiting;           /* The lock that the thread waits for. */
+    struct list lock_list;               /* The list of locks held by the thread. */
+    /* Proj 1. Advanced scheduler */
+    int nice;                            /* Nice. */
+    fp_t recent_cpu;                     /* Recent CPU. */
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
@@ -132,10 +142,14 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+bool thread_donate_priority (struct thread *t, int donation);
 
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
-
+void calculate_load_average(void);
+void increment_recent_cpu_for_running_thread (void);
+void calculate_recent_cpu (void);
+void calculate_priority_for_each_thread (void);
 #endif /* threads/thread.h */
