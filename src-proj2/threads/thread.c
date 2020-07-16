@@ -4,6 +4,7 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -11,6 +12,8 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
+#include "filesys/file.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -92,6 +95,8 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  lock_init (&running_executables_lock);
+  list_init (&running_executables);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -294,6 +299,33 @@ thread_exit (void)
   process_exit ();
 #endif
 
+  struct thread *t = thread_current ();
+    
+  while (!list_empty (&t->open_files)) {
+    struct file_descriptor *fdes = list_entry (list_pop_front (&t->open_files), struct file_descriptor, felem);
+    file_close (fdes->fptr);
+    free (fdes);
+  } 
+
+  while (!list_empty (&t->child_processes)) {
+    free (list_entry (list_pop_front (&t->child_processes), struct process_info, pelem));
+  }
+  
+  lock_acquire (&running_executables_lock);
+  for (struct list_elem *iter = list_begin (&running_executables);
+        iter != list_end (&running_executables);
+        iter = list_next (iter))
+  {
+    struct running_executable_info *einfo = list_entry (iter, struct running_executable_info, elem);
+    if (strcmp (einfo->name, t->name) == 0)
+    {
+      list_remove (iter);
+      free (einfo);
+      break;
+    }
+  }
+  lock_release (&running_executables_lock);
+
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
@@ -468,6 +500,15 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+
+  /* Not the main thread. */
+  if (strcmp(name, "main") != 0) {
+    t->parent = thread_current ();
+  }
+  list_init (&t->open_files);
+  t->next_fd = 2;
+  list_init (&t->child_processes);
+
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
 }

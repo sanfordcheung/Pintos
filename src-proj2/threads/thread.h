@@ -4,6 +4,14 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
+#include "filesys/file.h"
+//#define DEBUG
+
+/* A list of running executables. */
+struct list running_executables;
+/* Lock used when a process is manipulating running_executables list. */
+struct lock running_executables_lock;
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -13,6 +21,9 @@ enum thread_status
     THREAD_BLOCKED,     /* Waiting for an event to trigger. */
     THREAD_DYING        /* About to be destroyed. */
   };
+
+/* Process identifier type. */
+typedef int pid_t;
 
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
@@ -98,9 +109,55 @@ struct thread
     uint32_t *pagedir;                  /* Page directory. */
 #endif
 
+    /* Proj 1. Alarm clock */
+    int64_t remaining_ticks;             /* Remaining ticks in the THREAD_BLOCKED state. */
+    
+    /* Proj 2 */
+    struct thread *parent;              /* Pointer to parent thread. */
+    struct list open_files;             /* A list of files opened by the thread. */ 
+    int next_fd;                        /* The file descriptor for the next open file. */
+    struct list child_processes;        /* A list of child processes. */
+    
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+/* For user process.
+   File descriptor structure is used for files opened by a process.
+   By design, each process has an independent set of file descriptors.
+   When a single file is opened for more than once, whether by a single process
+   or different processes, each file open returns a new file descriptor.
+   fd 0 and 1 are reserved for STDIN_FILENO and STDOUT_FILENO
+*/
+struct file_descriptor {
+  int fd;                   /* The file descriptor. */
+  char name[16];            /* For project 2, file names are limited to 14 characters. */
+  struct file *fptr;        /* Pointer to the file. */
+  struct list_elem felem;   /* List element for the open_files list. */
+};
+
+/* For user process.
+   Process info structure is used to store the child process's pid, exit status, etc.
+   When a thread exits, it frees all elements in the child_processes list. */
+struct process_info {
+  pid_t pid;                /* Child process's process id. */
+  bool has_exited;          /* Has the process exited? */
+  bool is_waited;           /* Is the process waited by its parent process? */
+  int status;               /* If the process has exited, it stores the exit status. */
+  struct list_elem pelem;   /* List element for the child_processes list. */
+  struct semaphore sema;    /* Semaphore for the parent process to wait for child process. */
+};
+
+struct fn_pinfo {
+  const void *fn;
+  struct process_info *pinfo;
+};
+
+struct running_executable_info {
+  struct file *fptr;         /* Pointer to the executable file. */
+  char name[16];             /* File name. */
+  struct list_elem elem;     /* List element for the running_executables list. */
+};
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.

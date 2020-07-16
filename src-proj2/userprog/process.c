@@ -15,11 +15,23 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+/* Used to check whether a program fails loading. */
+#define STATUS_FAIL_LOAD -99
+
+/* Maximum number of arguments of a user process. */
+#define MAX_ARGS 64
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+
+/* A list of running executables. */
+extern struct list running_executables;
+/* Lock used when a process is manipulating running_executables list. */
+extern struct lock running_executables_lock;
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -38,19 +50,88 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* Make a copy of file_name to extract the executable name. */
+  char *fn_copy2;
+  fn_copy2 = palloc_get_page (0);
+  if (!fn_copy2) {
+    palloc_free_page (fn_copy);
+    return TID_ERROR;
+  }
+  strlcpy (fn_copy2, file_name, PGSIZE);
+  char *str1 = fn_copy2, *saveptr, *exec_name;
+  exec_name = strtok_r (str1, " ", &saveptr);
+
+  struct process_info *pinfo = (struct process_info*)malloc(sizeof(struct process_info));
+  if (!pinfo) {
+    palloc_free_page (fn_copy);
+    palloc_free_page (fn_copy2);
+    return TID_ERROR;
+  }
+  pinfo->has_exited = false;
+  pinfo->is_waited = false;
+  sema_init (&pinfo->sema, 0);
+
+  struct fn_pinfo *fpinfo = (struct fn_pinfo*)malloc(sizeof(struct fn_pinfo));
+  if (!fpinfo) {
+    free (pinfo);
+    palloc_free_page (fn_copy);
+    palloc_free_page (fn_copy2);
+    return TID_ERROR;
+  }
+  fpinfo->fn = fn_copy;
+  fpinfo->pinfo = pinfo;
+  list_push_back (&thread_current ()->child_processes, &pinfo->pelem);
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (exec_name, PRI_DEFAULT, start_process, fpinfo);
+  /* Correct order is important. 
+     The child process may exit before the current thread is unblocked.
+     Therefore, we should set pid before calling sema_down ().
+     Otherwise, there can be two consequences:
+     1. The child process exits but its exit status is not stored in pinfo. 
+     2. The parent process waits after the child process has exited. This
+     results in deadlock. */
+  pinfo->pid = (pid_t) tid;
+  /* Wait for the child process to finish loading.
+     This is required because when a child process fail loading, its parent process
+     should know (by checking the exit status). */
+  sema_down (&pinfo->sema);
+  /* Child process fails loading. */
+  if (pinfo->has_exited && pinfo->status == STATUS_FAIL_LOAD)
+  {
+    tid = TID_ERROR;
+  }
+  
+  free (fpinfo);
+
+  /* Now we can de-allocate fn_copy2. */
+  palloc_free_page (fn_copy2);
+
+  /* fn_copy is freed in start_process().
+     The following 3 lines are no longer needed because parent process will wait
+     for the child process to finish load. */
+  //if (tid == TID_ERROR) {
+  //  palloc_free_page (fn_copy);
+  //}
+
+  /* debug use */
+#ifdef DEBUG
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    printf ("[process execute] %d fail to create process\n", thread_current ()->tid);
+  else
+    printf ("[process_execute] %d create process %d success\n", thread_current ()->tid, tid);
+#endif
+
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *fn_pinfo_)
 {
-  char *file_name = file_name_;
+  ASSERT (fn_pinfo_);
+  struct fn_pinfo *fn_pinfo = (struct fn_pinfo*) fn_pinfo_;
+  char *file_name = fn_pinfo->fn;
   struct intr_frame if_;
   bool success;
 
@@ -61,10 +142,16 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
+  /* Unblock the parent process when the child process finishing loading. */
+  sema_up (&fn_pinfo->pinfo->sema);
+  
   /* If load failed, quit. */
   palloc_free_page (file_name);
-  if (!success) 
+  if (!success) {
+    fn_pinfo->pinfo->has_exited = true;
+    fn_pinfo->pinfo->status = STATUS_FAIL_LOAD;
     thread_exit ();
+  } 
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -86,8 +173,50 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (pid_t pid) 
 {
+
+#ifdef DEBUG
+  printf("[process wait] %d wait for pid %d\n", thread_current ()->tid, pid);
+#endif
+
+  struct thread *t = thread_current ();
+  for (struct list_elem *e = list_begin (&t->child_processes);
+    e != list_end (&t->child_processes);
+    e = list_next (e))
+  {
+    struct process_info *pinfo = list_entry (e, struct process_info, pelem);
+    if (pinfo->pid == pid)
+    { 
+      /* The child process has been waited. */
+      if (pinfo->is_waited)
+      {
+        return -1;
+      }
+
+      pinfo->is_waited = true;
+
+      /* The child process has exited. */
+      if (pinfo->has_exited)
+      {
+        return pinfo->status;
+      }
+#ifdef DEBUG
+      printf ("[process wait] %d start waiting for process %d\n", thread_current ()->tid, pinfo->pid);
+#endif  
+      
+      /* The child process is still alive. */ 
+      sema_down (&pinfo->sema);
+
+#ifdef DEBUG
+      printf ("[process wait] %d finish waiting for process %d\n", thread_current ()->tid, pinfo->pid);
+#endif      
+
+      return pinfo->status;
+    }
+  }
+
+  /* No child process with pid. */
   return -1;
 }
 
@@ -97,6 +226,38 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  /* debug use */
+#ifdef DEBUG
+  printf ("[process exit] %d exit\n", cur->tid);
+#endif
+
+  struct thread *parent = cur->parent;
+  /* The main thread (parent) calls process_exec () and process_wait () to execute
+     user processes (cur). The main thread does not retrieve user process's exit status.
+     Hence, when the user process exits, we call sema_up () so that the main
+     thread can be unblocked. */
+  /* User processes call the exit() syscall. The exit status is stored in the process_info
+     while in the exit() syscall. exit() calls thread_exit(), which calls process_exit().
+     Note that a user process may exit without calling exit(). For example, when a user process
+     accesses an invalid page, it causes a page fault. The page fault handler (i.e, page_fault() in
+     userprog/exception.c) calls thread_exit(). */
+  if (parent)
+  {
+    for (struct list_elem *e = list_begin (&parent->child_processes);
+      e != list_end (&parent->child_processes);
+      e = list_next (e))
+    {
+      struct process_info *pinfo = list_entry (e, struct process_info, pelem);
+      if (pinfo->pid == (pid_t) cur->tid)
+      {
+        pinfo->has_exited = true;
+        sema_up (&pinfo->sema);
+        break;
+      }
+    }
+  }
+
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -195,11 +356,32 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, const char *file_name);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
                           bool writable);
+
+/* Check whether the file is an ELF executable by checking its header. */
+bool
+is_executable (struct file *file)
+{
+  ASSERT (file);
+  struct Elf32_Ehdr ehdr;
+  /* Read and verify executable header. */
+  if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
+      || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
+      || ehdr.e_type != 2
+      || ehdr.e_machine != 3
+      || ehdr.e_version != 1
+      || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
+      || ehdr.e_phnum > 1024) 
+    {
+      return false;
+    }
+
+  return true;
+}
 
 /* Loads an ELF executable from FILE_NAME into the current thread.
    Stores the executable's entry point into *EIP
@@ -221,14 +403,32 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  /* Make a copy of file_name for setup_stack (). */
+  char *fn_copy;
+  fn_copy = palloc_get_page (0);
+  if (!fn_copy) {
+    goto done;
+  }
+  /* Make a copy of file_name to extract the exec_name. */
+  char *fn_copy2;
+  fn_copy2 = palloc_get_page (0);
+  if (!fn_copy2) {
+    palloc_free_page (fn_copy);
+    goto done;
+  }
+  strlcpy (fn_copy, file_name, PGSIZE);
+  strlcpy (fn_copy2, file_name, PGSIZE);
+  char *str1 = fn_copy2, *saveptr, *exec_name;
+  exec_name = strtok_r (str1, " ", &saveptr);
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (exec_name);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", exec_name);
       goto done; 
     }
-
+  
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -238,7 +438,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
       || ehdr.e_phnum > 1024) 
     {
-      printf ("load: %s: error loading executable\n", file_name);
+      printf ("load: %s: error loading executable\n", exec_name);
       goto done; 
     }
 
@@ -302,7 +502,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp, fn_copy))
     goto done;
 
   /* Start address. */
@@ -310,8 +510,24 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   success = true;
 
+  /* The executable is loaded successfully. 
+     Add the executable file to the running_executables list. */
+  lock_acquire (&running_executables_lock);
+  struct running_executable_info *einfo = (struct running_executable_info*)malloc (sizeof(struct running_executable_info));
+  if (!einfo)
+    success = false;
+  else {
+    einfo->fptr = file;
+    strlcpy (einfo->name, exec_name, sizeof einfo->name);
+    list_push_back (&running_executables, &einfo->elem);
+  }
+  lock_release (&running_executables_lock);
+
  done:
   /* We arrive here whether the load is successful or not. */
+  /* De-allocate fn_copy and fn_copy2. */
+  palloc_free_page (fn_copy);
+  palloc_free_page (fn_copy2);
   file_close (file);
   return success;
 }
@@ -424,10 +640,58 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   return true;
 }
 
+/* Swap two characters a, b in a string. */
+static void 
+swap (char *a, char *b) {
+  (*a) = (*a) ^ (*b);
+  (*b) = (*a) ^ (*b);
+  (*a) = (*a) ^ (*b);
+}
+
+/* Reverse the arguments in file_name. 
+  e.g. file_name := "args-many a b"
+       After calling reverse_arguments(file_name):
+       file_name = "b a args-many"
+*/
+static void 
+reverse_arguments (char *file_name) {
+  if (!file_name)
+    return;
+  int l = strlen(file_name);
+  if (l == 0)
+    return;
+  char *start = file_name, *end = file_name + l - 1, *tmp;
+  /* Reverse the whole string. */
+  /* "args-many a b" => "b a ynam-sgra" */
+  while (start < end) {
+    swap (start, end);
+    start++;
+    end--;
+  }
+  /* Reverse each argument. */
+  /* "b a ynam-sgra" => "b a args-many" */
+  start = file_name; end = start;
+  while (*end != '\0') {
+    while (*end != ' ' && *end != '\0')
+      end++;
+    tmp = end;
+    end--;
+    while (start < end) {
+      swap (start, end);
+      start++;
+      end--;
+    }
+    if (*tmp == '\0')
+      break;
+    start = tmp + 1;
+    end = start;
+  }
+}
+
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, const char *file_name) 
 {
   uint8_t *kpage;
   bool success = false;
@@ -441,6 +705,92 @@ setup_stack (void **esp)
       else
         palloc_free_page (kpage);
     }
+
+  /* Write the executable name (i.e, the first argument), arguments and their address onto the stack. */
+  /* The stack should look like:
+
+  low address
+      |         [4 zero bytes] [number of arguments] [align bytes] [address of *]
+      |         *[address of 1st arguments] ... [address of xth arguments]
+      |         [4 zero bytes] [align bytes] [1st argument] ... [xth argument]
+     \|/         
+  high address
+
+      Note: 1. by adding the size of all arguments and align bytes, the size (in bytes)
+            should be a multiple of 4. (align bytes should be 0, 1, 2 or 3)
+            2. addresses should be little endian
+  */
+  if (success) {
+    /* debug use. */
+    //void *esp_tmp = *esp;
+
+    char *fn_copy = palloc_get_page (0);
+    if (fn_copy == NULL)
+      return !success;
+    strlcpy (fn_copy, file_name, PGSIZE);
+    /* Note: according to the official guide, the last argument should be at
+       highest address.
+       Due to some mysterious reason, the first argument is at the highest
+       address in my Pintos setting. Therefore, the following code is commented. */
+    //reverse_arguments (fn_copy);
+
+    char *str1 = fn_copy, *saveptr, *token, *args_addr[MAX_ARGS];
+    int len = 0, token_len, args = 0;
+    token = strtok_r (str1, " ", &saveptr);
+
+    /* Write arguments to stack. */
+    while (token != NULL) {
+      /* memcpy should also copy '\0' */
+      token_len = strlen (token) + 1;
+      len += token_len;
+      *esp -= token_len;
+      /* Save addresses of arguments. */
+      args_addr[args] = (char*)malloc(sizeof(char*));
+      if (!args_addr[args])
+      {
+        palloc_free_page (fn_copy);
+        for (int i = 0; i < args; i++)
+          free (args_addr[i]);
+        return !success;
+      }
+      memcpy (args_addr[args++], esp, 4);
+      memcpy (*esp, token, token_len);
+      token = strtok_r (NULL, " ", &saveptr);
+    }
+    /* Align to 4 bytes. */
+    /* Note that "-" precedes "&" */
+    int word_align = 4 - (len & 0x3);
+    if (word_align > 0) {
+      *esp -= word_align;
+      memset (*esp, 0, word_align);
+    }
+    /* Write 4 zero bytes. */
+    *esp -= 4;
+    memset (*esp, 0, 4);
+    /* Write addresses of arguments. */
+    for(int i = args-1; i >= 0; i--) {
+      *esp -= sizeof(char*);
+      memcpy (*esp, args_addr[i], 4);
+    }
+    /* Write the address of [address of 1st argument]. */
+    char args0_addr[4];
+    memcpy (args0_addr, esp, 4);
+    *esp -= 4;
+    memcpy (*esp, args0_addr, 4);
+    /* Write the number of arguments. */
+    *esp -= 4;
+    memcpy (*esp, &args, 4);
+    /* Write 4 zero bytes. */
+    *esp -= 4;
+    memset (*esp, 0, 4);
+
+    palloc_free_page (fn_copy);
+    for (int i = 0; i < args; i++)
+      free (args_addr[i]);
+
+    /* debug use */
+    //hex_dump ((uintptr_t)*esp, *esp, esp_tmp-*esp, true);
+  }
   return success;
 }
 
