@@ -1,6 +1,6 @@
 
 		     +--------------------------+
-       	 |                          |	
+       	     |                          |
 		     | PROJECT 2: USER PROGRAMS	|
 		     | 	   DESIGN DOCUMENT     	|
 		     +--------------------------+
@@ -17,6 +17,7 @@ Shifan ZHANG sanfordcheung@gmail.com
 
 userprog/exception.c
 userprog/process.c
+userprog/process.h
 userprog/syscall.c
 userprog/syscall.h
 threads/thread.c

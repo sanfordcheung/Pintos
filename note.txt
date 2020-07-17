@@ -216,5 +216,269 @@ A: (1) Get one page as page directory which stores page directory entries (PDE).
    (2) Create page directory entries and page table entries (PTE). Each PDE/PTE consists of 20-bit physical address and 12-bit flag bits.
    (3) Store the physical address of the page directory into CR3.
 
- 
 
+
+proj 2
+
+at the beginning, type in command line `make check`, the result is as follows:
+
+FAIL tests/userprog/args-none
+FAIL tests/userprog/args-single
+FAIL tests/userprog/args-multiple
+FAIL tests/userprog/args-many
+FAIL tests/userprog/args-dbl-space
+FAIL tests/userprog/sc-bad-sp
+FAIL tests/userprog/sc-bad-arg
+FAIL tests/userprog/sc-boundary
+FAIL tests/userprog/sc-boundary-2
+FAIL tests/userprog/halt
+FAIL tests/userprog/exit
+FAIL tests/userprog/create-normal
+FAIL tests/userprog/create-empty
+FAIL tests/userprog/create-null
+FAIL tests/userprog/create-bad-ptr
+FAIL tests/userprog/create-long
+FAIL tests/userprog/create-exists
+FAIL tests/userprog/create-bound
+FAIL tests/userprog/open-normal
+FAIL tests/userprog/open-missing
+FAIL tests/userprog/open-boundary
+FAIL tests/userprog/open-empty
+FAIL tests/userprog/open-null
+FAIL tests/userprog/open-bad-ptr
+FAIL tests/userprog/open-twice
+FAIL tests/userprog/close-normal
+FAIL tests/userprog/close-twice
+FAIL tests/userprog/close-stdin
+FAIL tests/userprog/close-stdout
+FAIL tests/userprog/close-bad-fd
+FAIL tests/userprog/read-normal
+FAIL tests/userprog/read-bad-ptr
+FAIL tests/userprog/read-boundary
+FAIL tests/userprog/read-zero
+FAIL tests/userprog/read-stdout
+FAIL tests/userprog/read-bad-fd
+FAIL tests/userprog/write-normal
+FAIL tests/userprog/write-bad-ptr
+FAIL tests/userprog/write-boundary
+FAIL tests/userprog/write-zero
+FAIL tests/userprog/write-stdin
+FAIL tests/userprog/write-bad-fd
+FAIL tests/userprog/exec-once
+FAIL tests/userprog/exec-arg
+FAIL tests/userprog/exec-multiple
+FAIL tests/userprog/exec-missing
+FAIL tests/userprog/exec-bad-ptr
+FAIL tests/userprog/wait-simple
+FAIL tests/userprog/wait-twice
+FAIL tests/userprog/wait-killed
+FAIL tests/userprog/wait-bad-pid
+FAIL tests/userprog/multi-recurse
+FAIL tests/userprog/multi-child-fd
+FAIL tests/userprog/rox-simple
+FAIL tests/userprog/rox-child
+FAIL tests/userprog/rox-multichild
+FAIL tests/userprog/bad-read
+FAIL tests/userprog/bad-write
+FAIL tests/userprog/bad-read2
+FAIL tests/userprog/bad-write2
+FAIL tests/userprog/bad-jump
+FAIL tests/userprog/bad-jump2
+FAIL tests/userprog/no-vm/multi-oom
+FAIL tests/filesys/base/lg-create
+FAIL tests/filesys/base/lg-full
+FAIL tests/filesys/base/lg-random
+FAIL tests/filesys/base/lg-seq-block
+FAIL tests/filesys/base/lg-seq-random
+FAIL tests/filesys/base/sm-create
+FAIL tests/filesys/base/sm-full
+FAIL tests/filesys/base/sm-random
+FAIL tests/filesys/base/sm-seq-block
+FAIL tests/filesys/base/sm-seq-random
+FAIL tests/filesys/base/syn-read
+FAIL tests/filesys/base/syn-remove
+FAIL tests/filesys/base/syn-write
+76 of 76 tests failed.
+
+
+task1.1 implement a simple `process_wait()` using semaphore
+Q. When the main thread calls `init_thread()`, `malloc()` fails.
+A. In `threads/init.c`, `malloc_init()` is called after `thread_init()`.
+Solution. Call `malloc()` for the semaphore in `process_wait()`.
+
+task1.2 pass the file name to `thread_create()` and `filesys_open()` (in the 
+function `load()`)
+Note: the argument file_name in `process_execute()` is the raw file name, which
+consists file name and all the arguments.
+
+Now you can see the error message:
+'''bash
++ Page fault at 0xc0000008: rights violation error reading page in user context.
++ args-none: dying due to interrupt 0x0e (#PF Page-Fault Exception).
+when you run a test (for example, `args-many`)
+'''
+
+task1.3 set up the stack
+(please refer to the official guide: https://web.stanford.edu/class/cs140/projects/pintos/pintos_3.html#SEC51)
+
+Write the executable name (i.e, the first argument), arguments and their address onto the stack.
+The stack should look like:
+
+  low address
+      |         [4 zero bytes] [number of arguments] [align bytes] [address of *]
+      |         *[address of 1st arguments] ... [address of xth arguments]
+      |         [4 zero bytes] [align bytes] [1st argument] ... [xth argument]
+     \|/         
+  high address
+
+      Note: 1. by adding the size of all arguments and align bytes, the size (in bytes)
+            should be a multiple of 4. (align bytes should be 0, 1, 2 or 3)
+            2. addresses should be little endian
+
+After finishing setting up the stack, run the test `args-many` and you can see:
+'''bash
++ system call!
+'''
+
+`token = strtok_r(s1, s2, saveptr)`
+Note: 1. Don't `free(s1)` if you are still using `token`
+      2. `strtok_r()` modifies `s1` even if it is `const char *`
+
+task 1-4. implement a simple form of syscall `exit()`
+in userprog/syscall.c,
+'''c
+static void
+syscall_handler (struct intr_frame *f UNUSED) 
+{
+  printf ("system call!\n");
+  thread_exit ();
+}
+'''
+The user process calls `exit()` handled by the system call handler in the kernel.
+Now we register for a syscall `exit()`
+'''c
+switch(*(int*)f->esp)
+  {
+  	case SYS_EXIT:
+  	{
+  		int status = *((int*)f->esp + 1);
+  		printf("%s: exit(%d)\n", thread_current ()->name, status);
+  		thread_exit ();
+  	}
+  }
+'''
+
+task1.5 implement `write()` syscall to write to STDOUT_FILENO
+Use the function `putbuf()` defined in `stdio.h`
+
+Now you can pass all `args-` tests.
+
+task2.1 check validity of pointer passed to syscalls
+Three requirements should be satisfied:
+   1. Not a NULL pointer
+   2. Pointing to user virtual address space
+   3. In the user process page directory (i.e, the virtual memory is mapped) 
+
+task2.2 implement other sys calls except `exec()`, `wait()` and `exit()`
+Note: You must synchronize system calls so that any number of user processes can make them at once. In particular, it is not safe to call into the file system code provided in the ‘filesys’ directory from multiple threads at once. Your system call implementation must treat the file system code as a critical section. Don’t forget that `process_execute()` also accesses files. For now, we recommend against modifying code in the ‘filesys’ directory.
+
+task2.3 implement `exec()`, `wait()` and `exit()`
+
+task2.4 handle page faults caused by user program directly accessing an invalid page
+corresponding test cases: `bad-`
+
+task2.5 deny write to running executables 
+corresponding test cases: `rox-`
+
+Note: Executables that are not running can be modified
+
+task3 `multi-oom` test case
+
+"crashed child should return -1"
+check whether user process exits with -1 when it causes a page fault
+
+
+"expected depth: x, actual depth: y"
+check whether all malloc and palloc resources are freed when they are no longer used
+
+
+pass tests/filesys/base/syn-write
+pass tests/userprog/args-none
+pass tests/userprog/args-single
+pass tests/userprog/args-multiple
+pass tests/userprog/args-many
+pass tests/userprog/args-dbl-space
+pass tests/userprog/sc-bad-sp
+pass tests/userprog/sc-bad-arg
+pass tests/userprog/sc-boundary
+pass tests/userprog/sc-boundary-2
+pass tests/userprog/halt
+pass tests/userprog/exit
+pass tests/userprog/create-normal
+pass tests/userprog/create-empty
+pass tests/userprog/create-null
+pass tests/userprog/create-bad-ptr
+pass tests/userprog/create-long
+pass tests/userprog/create-exists
+pass tests/userprog/create-bound
+pass tests/userprog/open-normal
+pass tests/userprog/open-missing
+pass tests/userprog/open-boundary
+pass tests/userprog/open-empty
+pass tests/userprog/open-null
+pass tests/userprog/open-bad-ptr
+pass tests/userprog/open-twice
+pass tests/userprog/close-normal
+pass tests/userprog/close-twice
+pass tests/userprog/close-stdin
+pass tests/userprog/close-stdout
+pass tests/userprog/close-bad-fd
+pass tests/userprog/read-normal
+pass tests/userprog/read-bad-ptr
+pass tests/userprog/read-boundary
+pass tests/userprog/read-zero
+pass tests/userprog/read-stdout
+pass tests/userprog/read-bad-fd
+pass tests/userprog/write-normal
+pass tests/userprog/write-bad-ptr
+pass tests/userprog/write-boundary
+pass tests/userprog/write-zero
+pass tests/userprog/write-stdin
+pass tests/userprog/write-bad-fd
+pass tests/userprog/exec-once
+pass tests/userprog/exec-arg
+pass tests/userprog/exec-multiple
+pass tests/userprog/exec-missing
+pass tests/userprog/exec-bad-ptr
+pass tests/userprog/wait-simple
+pass tests/userprog/wait-twice
+pass tests/userprog/wait-killed
+pass tests/userprog/wait-bad-pid
+pass tests/userprog/multi-recurse
+pass tests/userprog/multi-child-fd
+pass tests/userprog/rox-simple
+pass tests/userprog/rox-child
+pass tests/userprog/rox-multichild
+pass tests/userprog/bad-read
+pass tests/userprog/bad-write
+pass tests/userprog/bad-read2
+pass tests/userprog/bad-write2
+pass tests/userprog/bad-jump
+pass tests/userprog/bad-jump2
+pass tests/userprog/no-vm/multi-oom
+pass tests/filesys/base/lg-create
+pass tests/filesys/base/lg-full
+pass tests/filesys/base/lg-random
+pass tests/filesys/base/lg-seq-block
+pass tests/filesys/base/lg-seq-random
+pass tests/filesys/base/sm-create
+pass tests/filesys/base/sm-full
+pass tests/filesys/base/sm-random
+pass tests/filesys/base/sm-seq-block
+pass tests/filesys/base/sm-seq-random
+pass tests/filesys/base/syn-read
+pass tests/filesys/base/syn-remove
+pass tests/filesys/base/syn-write
+All 76 tests passed.
+
+[EOF]

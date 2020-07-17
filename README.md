@@ -2,8 +2,8 @@
 
 Stanford University CS140 course project.
 
-- [Project 1. Threads](#threads)
-- [Project 2. User programs](#user-programs)
+- [Project 1. Threads](#threads) ([design document](src-proj1/threads/DESIGNDOC))
+- [Project 2. User programs](#user-programs) ([design document](src-proj2/userprog/DESIGNDOC))
 - [Project 3. Virtual memory](#virtual-memory)
 - [Project 4. File system](#file-system)
 
@@ -495,13 +495,13 @@ However, the user program may fail to load. How should the parent process know i
 
 A parent process waits for a child process and retrieves its exit status by the `wait()` syscall. Processes may spawn any number of children and wait for them in any order. Some situations for you to consider:
 
-- What if the child process has already terminated by the time its parent calls `wait()`? How should the parent process know whether it has terminated or not? How to retrieve its exit status?
+- (i) What if the child process has already terminated by the time its parent calls `wait()`? How should the parent process know whether it has terminated or not? How to retrieve its exit status?
 
-- What if the child process is terminated by the kernel due to an exception (e.g, accessing an invalid page)?
+- (ii) What if the child process is terminated by the kernel due to an exception (e.g, accessing an invalid page)?
 
-- What if a process waits for another process that is not its child?
+- (iii) What if a process waits for another process that is not its child?
 
-- What if a process waits for a child more than once?
+- (iv) What if a process waits for a child more than once?
 
 - 3.3 `exit()` and `process_exit()`
 
@@ -511,7 +511,17 @@ Some structure to store process information will not be freed until the parent p
 
 - 4.1 validate pointers in syscall
 
+A user program tries to access a memory location via a pointer. To check if the pointer provided by a user process is valid, two steps are involved:
+
+- (i) The pointer should point to a user virtual address. Note that the address space above the PHYS_BASE belongs to kernel virtual address space.
+
+- (ii) The pointer should point to a memory address that is mapped to this user process. 
+
 - 4.2 deny write to running executables
+
+This is implemented by maintaining a global running executable list. When a process is loaded successfully, we add it to the running executable list. It is removed from the list when it terminates.
+
+When a process calls `write()`, we check whether the file is a running executable. If it is, nothing will be written and `write()` will return 0.
 
 #### implementation
 in threads/thread.h, 
