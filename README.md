@@ -7,6 +7,7 @@ Stanford University CS140 course project.
 - [Project 3. Virtual memory](#virtual-memory)
 - [Project 4. File system](#file-system)
 
+Project 3 and 4 are not done yet. If you have any question regarding the projects, feel free to contact me at sanfordcheung@gmail.com
 
 ## Threads
 
